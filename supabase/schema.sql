@@ -39,10 +39,7 @@ drop policy if exists "Users can view own cron jobs" on public.cron_jobs;
 drop policy if exists "Users can create own cron jobs" on public.cron_jobs;
 drop policy if exists "Users can update own cron jobs" on public.cron_jobs;
 drop policy if exists "Users can delete own cron jobs" on public.cron_jobs;
-
 drop policy if exists "Users can view own executions" on public.job_executions;
-
-authenticated;
 
 create policy "Users can view own cron jobs" on public.cron_jobs for select using (auth.uid() = user_id);
 create policy "Users can create own cron jobs" on public.cron_jobs for insert with check (auth.uid() = user_id);
