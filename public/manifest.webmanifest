@@ -1,0 +1,13 @@
+{
+  "name": "CronFlow",
+  "short_name": "CronFlow",
+  "description": "HTTP cron job scheduling and monitoring",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#090b10",
+  "theme_color": "#090b10",
+  "icons": [
+    {"src":"/favicon.svg","sizes":"64x64","type":"image/svg+xml","purpose":"any maskable"},
+    {"src":"/logo.svg","sizes":"320x80","type":"image/svg+xml","purpose":"any"}
+  ]
+}
