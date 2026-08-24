@@ -12,196 +12,28 @@ const port = Number(process.env.PORT || 10000);
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined });
 const activeTasks = new Map();
 const JWT_SECRET = process.env.JWT_SECRET || 'change-this-secret-in-production';
-
-app.use(cors({ origin: process.env.FRONTEND_URL ? process.env.FRONTEND_URL.split(',') : true }));
+const allowedOrigins = (process.env.FRONTEND_URL || 'https://cronflow.onrender.com').split(',').map(x => x.trim().replace(/\/$/, '')).filter(Boolean);
+const corsOptions = { origin(origin, callback) { if (!origin || allowedOrigins.includes(origin.replace(/\/$/, ''))) return callback(null, true); return callback(new Error(`CORS origin not allowed: ${origin}`)); }, methods: ['GET','POST','PATCH','DELETE','OPTIONS'], allowedHeaders: ['Content-Type','Authorization'], optionsSuccessStatus: 204 };
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 app.use(express.json({ limit: '256kb' }));
 
-async function initDb() {
-  await pool.query(`
-    create extension if not exists pgcrypto;
-    create table if not exists users (
-      id uuid primary key default gen_random_uuid(),
-      email text unique not null,
-      password_hash text not null,
-      created_at timestamptz not null default now()
-    );
-    create table if not exists cron_jobs (
-      id uuid primary key default gen_random_uuid(),
-      user_id uuid not null references users(id) on delete cascade,
-      name text not null,
-      url text not null,
-      method text not null default 'GET' check (method in ('GET','POST','PUT','PATCH','DELETE','HEAD')),
-      headers jsonb not null default '{}'::jsonb,
-      body text,
-      schedule text not null,
-      timezone text not null default 'UTC',
-      enabled boolean not null default true,
-      last_run_at timestamptz,
-      last_status text,
-      created_at timestamptz not null default now()
-    );
-    create table if not exists job_executions (
-      id uuid primary key default gen_random_uuid(),
-      job_id uuid not null references cron_jobs(id) on delete cascade,
-      user_id uuid not null references users(id) on delete cascade,
-      started_at timestamptz not null default now(),
-      finished_at timestamptz,
-      status text not null,
-      status_code integer,
-      response_time_ms integer,
-      error_message text
-    );
-    create index if not exists cron_jobs_user_id_idx on cron_jobs(user_id);
-    create index if not exists job_executions_user_id_idx on job_executions(user_id);
-    create index if not exists job_executions_job_id_idx on job_executions(job_id);
-  `);
-}
-
+async function initDb() { await pool.query(`create extension if not exists pgcrypto; create table if not exists users (id uuid primary key default gen_random_uuid(), email text unique not null, password_hash text not null, created_at timestamptz not null default now()); create table if not exists cron_jobs (id uuid primary key default gen_random_uuid(), user_id uuid not null references users(id) on delete cascade, name text not null, url text not null, method text not null default 'GET' check (method in ('GET','POST','PUT','PATCH','DELETE','HEAD')), headers jsonb not null default '{}'::jsonb, body text, schedule text not null, timezone text not null default 'UTC', enabled boolean not null default true, last_run_at timestamptz, last_status text, created_at timestamptz not null default now()); create table if not exists job_executions (id uuid primary key default gen_random_uuid(), job_id uuid not null references cron_jobs(id) on delete cascade, user_id uuid not null references users(id) on delete cascade, started_at timestamptz not null default now(), finished_at timestamptz, status text not null, status_code integer, response_time_ms integer, error_message text); create index if not exists cron_jobs_user_id_idx on cron_jobs(user_id); create index if not exists job_executions_user_id_idx on job_executions(user_id); create index if not exists job_executions_job_id_idx on job_executions(job_id);`); }
 function signUser(user) { return jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '30d' }); }
-
-function auth(req, res, next) {
-  const token = req.headers.authorization?.replace(/^Bearer\s+/i, '');
-  if (!token) return res.status(401).json({ error: 'Missing access token' });
-  try { req.user = jwt.verify(token, JWT_SECRET); next(); }
-  catch { return res.status(401).json({ error: 'Invalid or expired access token' }); }
-}
-
-function validUrl(value) {
-  try { const u = new URL(value); return ['http:', 'https:'].includes(u.protocol); }
-  catch { return false; }
-}
-
-async function executeJob(job) {
-  const started = Date.now();
-  let status = 'failed';
-  let statusCode = null;
-  let errorMessage = null;
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), Number(process.env.REQUEST_TIMEOUT_MS || 30000));
-    const response = await fetch(job.url, {
-      method: job.method || 'GET',
-      headers: job.headers || {},
-      body: ['GET','HEAD'].includes(job.method || 'GET') ? undefined : (job.body || undefined),
-      signal: controller.signal,
-      redirect: 'follow'
-    });
-    clearTimeout(timeout);
-    statusCode = response.status;
-    await response.text();
-    status = response.ok ? 'success' : 'failed';
-  } catch (error) {
-    errorMessage = error.name === 'AbortError' ? 'Request timed out' : error.message;
-  }
-  const responseTime = Date.now() - started;
-  await pool.query(`insert into job_executions (job_id,user_id,started_at,finished_at,status,status_code,response_time_ms,error_message) values ($1,$2,$3,now(),$4,$5,$6,$7)`, [job.id, job.user_id, new Date(started), status, statusCode, responseTime, errorMessage]);
-  await pool.query(`update cron_jobs set last_run_at=now(), last_status=$1 where id=$2`, [status, job.id]);
-  return { status, statusCode, responseTime, errorMessage };
-}
-
-function scheduleJob(job) {
-  if (activeTasks.has(job.id)) { activeTasks.get(job.id).stop(); activeTasks.delete(job.id); }
-  if (!job.enabled || !cron.validate(job.schedule)) return;
-  const task = cron.schedule(job.schedule, () => executeJob(job).catch(console.error), { timezone: job.timezone || 'UTC' });
-  activeTasks.set(job.id, task);
-}
-
-async function loadSchedules() {
-  const { rows } = await pool.query(`select * from cron_jobs where enabled=true`);
-  rows.forEach(scheduleJob);
-  console.log(`Loaded ${rows.length} active cron jobs`);
-}
-
-app.get('/health', (_req, res) => res.json({ ok: true, service: 'cronflow-api', database: 'neon', time: new Date().toISOString() }));
-
-app.post('/api/auth/register', async (req, res) => {
-  const email = String(req.body?.email || '').trim().toLowerCase();
-  const password = String(req.body?.password || '');
-  if (!/^\S+@\S+\.\S+$/.test(email)) return res.status(400).json({ error: 'Enter a valid email address' });
-  if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
-  try {
-    const hash = await bcrypt.hash(password, 12);
-    const { rows } = await pool.query(`insert into users(email,password_hash) values($1,$2) returning id,email,created_at`, [email, hash]);
-    const user = rows[0];
-    res.status(201).json({ token: signUser(user), user });
-  } catch (error) {
-    if (error.code === '23505') return res.status(409).json({ error: 'An account with this email already exists' });
-    console.error(error); res.status(500).json({ error: 'Could not create account' });
-  }
-});
-
-app.post('/api/auth/login', async (req, res) => {
-  const email = String(req.body?.email || '').trim().toLowerCase();
-  const password = String(req.body?.password || '');
-  const { rows } = await pool.query(`select id,email,password_hash,created_at from users where email=$1`, [email]);
-  if (!rows[0] || !(await bcrypt.compare(password, rows[0].password_hash))) return res.status(401).json({ error: 'Invalid email or password' });
-  const user = { id: rows[0].id, email: rows[0].email, created_at: rows[0].created_at };
-  res.json({ token: signUser(user), user });
-});
-
-app.get('/api/auth/me', auth, async (req, res) => {
-  const { rows } = await pool.query(`select id,email,created_at from users where id=$1`, [req.user.id]);
-  if (!rows[0]) return res.status(401).json({ error: 'Account not found' });
-  res.json({ user: rows[0] });
-});
-
-app.get('/api/jobs', auth, async (req, res) => {
-  const { rows } = await pool.query(`select * from cron_jobs where user_id=$1 order by created_at desc`, [req.user.id]);
-  res.json(rows);
-});
-
-app.post('/api/jobs', auth, async (req, res) => {
-  const { name, url, method = 'GET', schedule, timezone = 'UTC', headers = {}, body = null } = req.body || {};
-  if (!name || !url || !schedule) return res.status(400).json({ error: 'name, url and schedule are required' });
-  if (!validUrl(url)) return res.status(400).json({ error: 'Only HTTP and HTTPS URLs are supported' });
-  if (!cron.validate(schedule)) return res.status(400).json({ error: 'Invalid cron expression' });
-  if (!['GET','POST','PUT','PATCH','DELETE','HEAD'].includes(method)) return res.status(400).json({ error: 'Unsupported HTTP method' });
-  const { rows } = await pool.query(`insert into cron_jobs(user_id,name,url,method,schedule,timezone,headers,body,enabled) values($1,$2,$3,$4,$5,$6,$7,$8,true) returning *`, [req.user.id,name,url,method,schedule,timezone,headers,body]);
-  scheduleJob(rows[0]);
-  res.status(201).json(rows[0]);
-});
-
-app.patch('/api/jobs/:id', auth, async (req, res) => {
-  const allowed = ['name','url','method','schedule','timezone','headers','body','enabled'];
-  const updates = Object.fromEntries(Object.entries(req.body || {}).filter(([key]) => allowed.includes(key)));
-  if (updates.url && !validUrl(updates.url)) return res.status(400).json({ error: 'Invalid URL' });
-  if (updates.schedule && !cron.validate(updates.schedule)) return res.status(400).json({ error: 'Invalid cron expression' });
-  const keys = Object.keys(updates);
-  if (!keys.length) return res.status(400).json({ error: 'No valid fields supplied' });
-  const values = [req.params.id, req.user.id];
-  const sets = keys.map((key, i) => { values.push(updates[key]); return `${key}=$${i + 3}`; });
-  const { rows } = await pool.query(`update cron_jobs set ${sets.join(',')} where id=$1 and user_id=$2 returning *`, values);
-  if (!rows[0]) return res.status(404).json({ error: 'Job not found' });
-  scheduleJob(rows[0]);
-  res.json(rows[0]);
-});
-
-app.delete('/api/jobs/:id', auth, async (req, res) => {
-  if (activeTasks.has(req.params.id)) { activeTasks.get(req.params.id).stop(); activeTasks.delete(req.params.id); }
-  const result = await pool.query(`delete from cron_jobs where id=$1 and user_id=$2`, [req.params.id, req.user.id]);
-  if (!result.rowCount) return res.status(404).json({ error: 'Job not found' });
-  res.status(204).end();
-});
-
-app.post('/api/jobs/:id/run', auth, async (req, res) => {
-  const { rows } = await pool.query(`select * from cron_jobs where id=$1 and user_id=$2`, [req.params.id, req.user.id]);
-  if (!rows[0]) return res.status(404).json({ error: 'Job not found' });
-  executeJob(rows[0]).catch(console.error);
-  res.status(202).json({ queued: true });
-});
-
-app.get('/api/executions', auth, async (req, res) => {
-  const { rows } = await pool.query(`select e.*, j.name as job_name from job_executions e left join cron_jobs j on j.id=e.job_id where e.user_id=$1 order by e.started_at desc limit 100`, [req.user.id]);
-  res.json(rows);
-});
-
-async function start() {
-  if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
-  await initDb();
-  app.listen(port, '0.0.0.0', async () => {
-    console.log(`CronFlow API running on port ${port}`);
-    await loadSchedules();
-  });
-}
-
-start().catch(error => { console.error('Startup failed:', error); process.exit(1); });
+function auth(req,res,next) { const token=req.headers.authorization?.replace(/^Bearer\s+/i,''); if(!token) return res.status(401).json({error:'Missing access token'}); try{req.user=jwt.verify(token,JWT_SECRET);next();}catch{return res.status(401).json({error:'Invalid or expired access token'});} }
+function validUrl(value){try{const u=new URL(value);return ['http:','https:'].includes(u.protocol);}catch{return false;}}
+async function executeJob(job){const started=Date.now();let status='failed',statusCode=null,errorMessage=null;try{const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),Number(process.env.REQUEST_TIMEOUT_MS||30000));const response=await fetch(job.url,{method:job.method||'GET',headers:job.headers||{},body:['GET','HEAD'].includes(job.method||'GET')?undefined:(job.body||undefined),signal:controller.signal,redirect:'follow'});clearTimeout(timeout);statusCode=response.status;await response.text();status=response.ok?'success':'failed';}catch(error){errorMessage=error.name==='AbortError'?'Request timed out':error.message;}const responseTime=Date.now()-started;await pool.query(`insert into job_executions (job_id,user_id,started_at,finished_at,status,status_code,response_time_ms,error_message) values ($1,$2,$3,now(),$4,$5,$6,$7)`,[job.id,job.user_id,new Date(started),status,statusCode,responseTime,errorMessage]);await pool.query(`update cron_jobs set last_run_at=now(),last_status=$1 where id=$2`,[status,job.id]);return{status,statusCode,responseTime,errorMessage};}
+function scheduleJob(job){if(activeTasks.has(job.id)){activeTasks.get(job.id).stop();activeTasks.delete(job.id);}if(!job.enabled||!cron.validate(job.schedule))return;const task=cron.schedule(job.schedule,()=>executeJob(job).catch(console.error),{timezone:job.timezone||'UTC'});activeTasks.set(job.id,task);}
+async function loadSchedules(){const{rows}=await pool.query(`select * from cron_jobs where enabled=true`);rows.forEach(scheduleJob);console.log(`Loaded ${rows.length} active cron jobs`);}
+app.get('/health',(_req,res)=>res.json({ok:true,service:'cronflow-api',database:'neon',time:new Date().toISOString()}));
+app.post('/api/auth/register',async(req,res)=>{const email=String(req.body?.email||'').trim().toLowerCase();const password=String(req.body?.password||'');if(!/^\S+@\S+\.\S+$/.test(email))return res.status(400).json({error:'Enter a valid email address'});if(password.length<8)return res.status(400).json({error:'Password must be at least 8 characters'});try{const hash=await bcrypt.hash(password,12);const{rows}=await pool.query(`insert into users(email,password_hash) values($1,$2) returning id,email,created_at`,[email,hash]);const user=rows[0];res.status(201).json({token:signUser(user),user});}catch(error){if(error.code==='23505')return res.status(409).json({error:'An account with this email already exists'});console.error(error);res.status(500).json({error:'Could not create account'});}});
+app.post('/api/auth/login',async(req,res)=>{const email=String(req.body?.email||'').trim().toLowerCase();const password=String(req.body?.password||'');const{rows}=await pool.query(`select id,email,password_hash,created_at from users where email=$1`,[email]);if(!rows[0]||!(await bcrypt.compare(password,rows[0].password_hash)))return res.status(401).json({error:'Invalid email or password'});const user={id:rows[0].id,email:rows[0].email,created_at:rows[0].created_at};res.json({token:signUser(user),user});});
+app.get('/api/auth/me',auth,async(req,res)=>{const{rows}=await pool.query(`select id,email,created_at from users where id=$1`,[req.user.id]);if(!rows[0])return res.status(401).json({error:'Account not found'});res.json({user:rows[0]});});
+app.get('/api/jobs',auth,async(req,res)=>{const{rows}=await pool.query(`select * from cron_jobs where user_id=$1 order by created_at desc`,[req.user.id]);res.json(rows);});
+app.post('/api/jobs',auth,async(req,res)=>{const{name,url,method='GET',schedule,timezone='UTC',headers={},body=null}=req.body||{};if(!name||!url||!schedule)return res.status(400).json({error:'name, url and schedule are required'});if(!validUrl(url))return res.status(400).json({error:'Only HTTP and HTTPS URLs are supported'});if(!cron.validate(schedule))return res.status(400).json({error:'Invalid cron expression'});if(!['GET','POST','PUT','PATCH','DELETE','HEAD'].includes(method))return res.status(400).json({error:'Unsupported HTTP method'});const{rows}=await pool.query(`insert into cron_jobs(user_id,name,url,method,schedule,timezone,headers,body,enabled) values($1,$2,$3,$4,$5,$6,$7,$8,true) returning *`,[req.user.id,name,url,method,schedule,timezone,headers,body]);scheduleJob(rows[0]);res.status(201).json(rows[0]);});
+app.patch('/api/jobs/:id',auth,async(req,res)=>{const allowed=['name','url','method','schedule','timezone','headers','body','enabled'];const updates=Object.fromEntries(Object.entries(req.body||{}).filter(([key])=>allowed.includes(key)));if(updates.url&&!validUrl(updates.url))return res.status(400).json({error:'Invalid URL'});if(updates.schedule&&!cron.validate(updates.schedule))return res.status(400).json({error:'Invalid cron expression'});const keys=Object.keys(updates);if(!keys.length)return res.status(400).json({error:'No valid fields supplied'});const values=[req.params.id,req.user.id];const sets=keys.map((key,i)=>{values.push(updates[key]);return `${key}=$${i+3}`;});const{rows}=await pool.query(`update cron_jobs set ${sets.join(',')} where id=$1 and user_id=$2 returning *`,values);if(!rows[0])return res.status(404).json({error:'Job not found'});scheduleJob(rows[0]);res.json(rows[0]);});
+app.delete('/api/jobs/:id',auth,async(req,res)=>{if(activeTasks.has(req.params.id)){activeTasks.get(req.params.id).stop();activeTasks.delete(req.params.id);}const result=await pool.query(`delete from cron_jobs where id=$1 and user_id=$2`,[req.params.id,req.user.id]);if(!result.rowCount)return res.status(404).json({error:'Job not found'});res.status(204).end();});
+app.post('/api/jobs/:id/run',auth,async(req,res)=>{const{rows}=await pool.query(`select * from cron_jobs where id=$1 and user_id=$2`,[req.params.id,req.user.id]);if(!rows[0])return res.status(404).json({error:'Job not found'});executeJob(rows[0]).catch(console.error);res.status(202).json({queued:true});});
+app.get('/api/executions',auth,async(req,res)=>{const{rows}=await pool.query(`select e.*,j.name as job_name from job_executions e left join cron_jobs j on j.id=e.job_id where e.user_id=$1 order by e.started_at desc limit 100`,[req.user.id]);res.json(rows);});
+async function start(){if(!process.env.DATABASE_URL)throw new Error('DATABASE_URL is required');await initDb();app.listen(port,'0.0.0.0',async()=>{console.log(`CronFlow API running on port ${port}`);await loadSchedules();});}
+start().catch(error=>{console.error('Startup failed:',error);process.exit(1);});
