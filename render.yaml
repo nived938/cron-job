@@ -1,17 +1,19 @@
 services:
   - type: web
-    name: cronflow-api
+    name: cronflow-backend
     runtime: node
     plan: free
     buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /health
     envVars:
-      - key: SUPABASE_URL
+      - key: DATABASE_URL
         sync: false
-      - key: SUPABASE_SERVICE_ROLE_KEY
+      - key: JWT_SECRET
         sync: false
       - key: FRONTEND_URL
         sync: false
       - key: REQUEST_TIMEOUT_MS
         value: "30000"
+      - key: NODE_ENV
+        value: production
