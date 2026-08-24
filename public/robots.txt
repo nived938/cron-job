@@ -1,0 +1,8 @@
+User-agent: *
+Allow: /
+Disallow: /dashboard
+Disallow: /jobs
+Disallow: /history
+Disallow: /settings
+Disallow: /api/
+Sitemap: https://cronflow.onrender.com/sitemap.xml
