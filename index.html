@@ -3,11 +3,37 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="CronFlow, a modern HTTP cron job scheduler." />
-    <title>CronFlow</title>
+    <meta name="description" content="CronFlow, a modern HTTP cron job scheduler and monitoring platform." />
+    <meta name="theme-color" content="#090b10" />
+    <title>CronFlow, HTTP Cron Job Scheduler & Monitoring</title>
+    <style>
+      html,body{margin:0;background:#090b10;color:#e9edf5;font-family:system-ui,-apple-system,Segoe UI,sans-serif}
+      #boot-loader{position:fixed;inset:0;z-index:99999;display:grid;place-items:center;background:radial-gradient(circle at 50% 20%,#192137 0,transparent 45%),#090b10;transition:opacity .35s ease,visibility .35s ease}
+      #boot-loader.hide{opacity:0;visibility:hidden;pointer-events:none}
+      .boot-box{text-align:center}.boot-logo{width:48px;height:48px;margin:0 auto 16px;border-radius:13px;background:#f3f5f8;color:#090b10;display:grid;place-items:center;font-size:25px;font-weight:800;box-shadow:0 0 35px #fff2}
+      .boot-name{font-size:22px;font-weight:750;letter-spacing:-.03em}.boot-sub{margin-top:7px;color:#7f899c;font-size:12px}.boot-spinner{width:22px;height:22px;margin:18px auto 0;border:2px solid #2a3342;border-top-color:#f3f5f8;border-radius:50%;animation:spin .8s linear infinite}
+      @keyframes spin{to{transform:rotate(360deg)}}
+      #runtime-error{display:none;min-height:100vh;place-items:center;padding:24px;background:#090b10}#runtime-error .card{max-width:520px;text-align:center;padding:32px;border:1px solid #2b3442;border-radius:14px;background:#11151d}#runtime-error h1{margin:0 0 8px}#runtime-error p{color:#7f899c;line-height:1.6}#runtime-error button{background:#f3f5f8;color:#090b10;border:0;border-radius:8px;padding:10px 15px;font-weight:700;cursor:pointer}
+    </style>
+    <script>
+      window.addEventListener('error',function(e){
+        if(!e.error)return;
+        var root=document.getElementById('root'),err=document.getElementById('runtime-error');
+        if(err){err.style.display='grid';document.getElementById('runtime-message').textContent='CronFlow could not start correctly. Reload the page to try again.'}
+        if(root)root.style.display='none';
+      });
+      window.addEventListener('unhandledrejection',function(e){
+        if(!e.reason)return;
+        var err=document.getElementById('runtime-error');
+        if(err){err.style.display='grid';document.getElementById('runtime-message').textContent='CronFlow encountered an unexpected error. Reload the page to try again.'}
+      });
+    </script>
   </head>
   <body>
+    <div id="boot-loader"><div class="boot-box"><div class="boot-logo">C</div><div class="boot-name">CronFlow</div><div class="boot-sub">Loading your automation workspace</div><div class="boot-spinner"></div></div></div>
+    <div id="runtime-error"><div class="card"><h1>Something went wrong</h1><p id="runtime-message">CronFlow could not start correctly.</p><button onclick="location.reload()">Reload CronFlow</button></div></div>
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>
+    <script>window.addEventListener('load',function(){setTimeout(function(){var x=document.getElementById('boot-loader');if(x)x.classList.add('hide')},450)});</script>
   </body>
 </html>
